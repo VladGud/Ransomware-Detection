@@ -8,7 +8,7 @@ try:
 except Exception:
     from file_gen import create_file
 
-path = "D:\\test\\"
+path = "D:\\Work\\pythonProject\\TestDir\\"
 
 
 def cipher(read, rename, write_or_move, read_times, rename_times, write_times):

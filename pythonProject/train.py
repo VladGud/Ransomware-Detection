@@ -1,5 +1,5 @@
 import pandas as pd
-import category_encoders as ce
+#import category_encoders as ce
 import pandas as pd
 import sklearn
 from imblearn.ensemble import BalancedRandomForestClassifier, EasyEnsembleClassifier, BalancedBaggingClassifier
@@ -38,7 +38,7 @@ import sklearn.ensemble as se
 pd.options.mode.chained_assignment = None
 warnings.filterwarnings("ignore")
 
-df = pd.read_csv("/Users/artemkalinkin/PycharmProjects/pythonProject/data/main.csv", index_col=0)
+df = pd.read_csv("data//main.csv", index_col=0)
 print(df)
 
 columns = list(df.columns)

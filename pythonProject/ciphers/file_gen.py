@@ -1,8 +1,8 @@
 import os
 from random import random
-file_pathes = ["D:test\\"]
+file_pathes = ["D:\\Work\\pythonProject\\TestDir\\FileGen"]
 
-count = 100
+count = 10
 
 
 def create_dir(__file_path):
@@ -25,4 +25,4 @@ def gen_files():
         create_dir(file_path)
         for i in range(0, count):
             create_file(file_path, str(i))
-# gen_files()
+gen_files()

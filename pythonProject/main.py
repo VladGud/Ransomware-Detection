@@ -1,11 +1,10 @@
-import queue
-import random
+import sys
+sys.path.append('etw')
+from Serializer import *
 import etw
-from etw.evntrace import TRACE_LEVEL_VERBOSE, TRACE_LEVEL_INFORMATION
-import threading
+from etw.evntrace import TRACE_LEVEL_INFORMATION
 import time
-from parallel import Consumer, MyConcurrentCollection
-from Serializer import Serializer
+from parallel import Consumer, MyConcurrentCollection, EventDictionary
 import matplotlib.pyplot as plt
 
 
@@ -13,22 +12,35 @@ session_length = 1
 col = MyConcurrentCollection()
 
 
-def some_func():
+def init_session_and_consumer():
+    ed = EventDictionary()
+    task_filters = list(ed.maskProcess.keys()) + list(ed.maskFile.keys())[:len(ed.maskFile) - 2]
+    del task_filters[1::2]
     threads_count = 1
     consumers = [Consumer(col) for _ in range(threads_count)]
     providers = [etw.ProviderInfo('Microsoft-Windows-Kernel-File',
                                   etw.GUID("{EDD08927-9CC4-4E65-B970-C2560FB5C289}"),
-                                  level=TRACE_LEVEL_INFORMATION)]  # TRACE_LEVEL_VERBOSE
-    job = etw.ETW(providers=providers, event_callback=col.append)
+                                  level=TRACE_LEVEL_INFORMATION),
+                 etw.ProviderInfo('Microsoft-Windows-Kernel-Process',
+                                  etw.GUID("{22FB2CD6-0E7B-422B-A0C7-2FAD1FD0E716}"),
+                                  level=TRACE_LEVEL_INFORMATION)]
+    job = etw.ETW(session_name="MyRansomwareDetectSession", providers=providers, event_callback=col.append,
+                  task_name_filters=task_filters)
 
-    def work():
+    def start_session_and_consumer():
         print("start")
         job.start()
         time.sleep(session_length)
         job.stop()
+        print("stop")
 
-        print(col.print_collection())
+        if not col.empty():
+            print(col.print_collection())
         print(col)
+
+        sx = 0
+        ser = Serializer()
+        ser.serialize("EventLog", list(col.collection.queue))
 
         for consumer in consumers:
             consumer.start()
@@ -36,8 +48,8 @@ def some_func():
         for consumer in consumers:
             consumer.join()
 
-        sx = 0
         for consumer in consumers:
+            sx += 1
             x = []
             for i in range(0, len(consumer.times), 2):
                 x.append(consumer.times[i + 1] - consumer.times[i])
@@ -45,14 +57,14 @@ def some_func():
             plt.plot([i for i in range(len(x))], x)
             plt.show()
 
-            sx = max(sx, sum(x))
+            #sx = max(sx, sum(x))
 
         print(sx)
 
-    work()
+    start_session_and_consumer()
 
 
-some_func()
+init_session_and_consumer()
 
 # ser = Serializer()
 # num = 16

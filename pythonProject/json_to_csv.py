@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from Serializer import Serializer
-from parallel import ProcessMonitor
+from parallel import EventDictionary
 numbers = [
 "0 - 6848",
 "1 - 13616",
@@ -22,7 +22,7 @@ numbers = [
 ]
 
 ser = Serializer()
-pm = ProcessMonitor()
+pm = EventDictionary()
 pm.df['label'] = np.zeros(len(pm.df))
 
 for i in numbers:

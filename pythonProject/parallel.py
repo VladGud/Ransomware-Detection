@@ -7,6 +7,7 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 import psutil
+from numpy import uint64
 from sklearn.metrics import f1_score, accuracy_score, balanced_accuracy_score, classification_report
 
 pd.options.display.max_seq_items = None
@@ -36,64 +37,117 @@ class MyConcurrentCollection:
         return self.collection.empty()
 
 
-class ProcessMonitor:
+class EventDictionary:
     def __init__(self):
-        self.df = defaultdict(lambda: np.zeros(44))
-        self.mask = {
+        self.maskFile = {
             "OPERATIONEND": 0,
             24: 1,
+
             "CLOSE": 2,
             14: 3,
+
             "CREATE": 4,
             12: 5,
-            "QUERYSECURITY": 6,
-            32: 7,
-            "FSCTL": 8,
-            23: 9,
-            "QUERYINFORMATION": 10,
-            22: 11,
-            "CLEANUP": 12,
-            13: 13,
-            "READ": 14,
-            15: 15,
-            "DIRNOTIFY": 16,
-            25: 17,
-            "CREATENEWFILE": 18,
-            30: 19,
-            "WRITE": 20,
-            16: 21,
-            "NAMECREATE": 22,
-            10: 23,
-            "SETINFORMATION": 24,
-            17: 25,
-            "RENAME": 26,
-            19: 27,
-            "RENAMEPATH": 28,
-            27: 29,
-            "NAMEDELETE": 30,
-            11: 31,
-            "SETDELETE": 32,
-            18: 33,
-            "DELETEPATH": 34,
-            26: 35,
-            "DIRENUM": 36,
-            20: 37,
-            "QUERYEA": 38,
-            34: 39,
-            "FLUSH": 40,
-            21: 41,
-            "SETSECURITY": 42,
-            31: 43,
+
+            "CLEANUP": 6,
+            13: 7,
+
+            "READ": 8,
+            15: 9,
+
+            "CREATENEWFILE": 10,
+            30: 11,
+
+            "WRITE": 12,
+            16: 13,
+
+            "NAMECREATE": 14,
+            10: 15,
+
+            "SETINFORMATION": 16,
+            17: 17,
+
+            "RENAME": 18,
+            19: 19,
+
+            "RENAMEPATH": 20,
+            27: 21,
+
+            "NAMEDELETE": 22,
+            11: 23,
+
+            "SETDELETE": 24,
+            18: 25,
+
+            "DELETEPATH": 26,
+            26: 27,
+
+            "SETSECURITY": 28,
+            31: 29,
+
+            "READSIZE": 30,
+
+            "WRITESIZE": 31,
         }
+        self.maskProcess = {
+            "PROCESSSTART": 0,
+            1: 1,
+
+            "PROCESSSTOP": 2,
+            2: 3,
+
+            'THREADSTART': 4,
+            3: 5,
+
+            'THREADSTOP': 6,
+            4: 7,
+
+            'IMAGELOAD': 8,
+            5: 9,
+
+            'IMAGEUNLOAD': 10,
+            6: 11,
+        }
+
+        self.dfFile = defaultdict(lambda: np.zeros(len(self.maskFile)))
+        self.dfProcess = defaultdict(lambda: np.zeros(len(self.maskProcess)))
+
+        self.dfTimeRead = defaultdict(list)
+        self.dfTimeWrite = defaultdict(list)
+
+        self.lastWrite = -1
+        self.lastRead = -1
+
         with open("data\\isolation_forest_model.pkl", 'rb') as file:
             self.model = pickle.load(file)
 
-    def append(self, pid, task, event):
-        self.df[pid][self.mask[task]] += 1
-        self.df[pid][self.mask[event]] += 1
+    def append(self, pid, task, event, provider, io_size, timestamp):
+        try:
+            if provider != '{22FB2CD6-0E7B-422B-A0C7-2FAD1FD0E716}':
+                self.dfFile[pid][self.maskFile[task]] += 1
+                self.dfFile[pid][self.maskFile[event]] += 1
+
+                if task == 'WRITE':
+                    self.dfFile[pid][self.maskFile["WRITESIZE"]] += int(io_size, 0)
+                    self.dfTimeWrite[pid].append(timestamp - (self.lastWrite if self.lastWrite != -1 else 0))
+                    self.lastWrite = timestamp
+
+                if task == 'READ':
+                    self.dfFile[pid][self.maskFile["READSIZE"]] += int(io_size, 0)
+                    self.dfTimeRead[pid].append(timestamp - (self.lastRead if self.lastRead != -1 else 0))
+                    self.lastRead = timestamp
+
+            else:
+                self.dfProcess[pid][self.maskProcess[task]] += 1
+                self.dfProcess[pid][self.maskProcess[event]] += 1
+
+        except KeyError:
+            return
+
+
 
     def predict(self):
-        return [[key, self.model.predict([self.df[key]])] for key in self.df]
+        return [[key, self.model.predict([self.dfFile[key]])] for key in self.dfFile]
 
 
 class Consumer(threading.Thread):
@@ -101,16 +155,17 @@ class Consumer(threading.Thread):
         threading.Thread.__init__(self)
         self.daemon = True
         self.collection = collection
+        self.times = []
+        self.ed = EventDictionary()
         pd.options.display.max_columns = None
         pd.options.display.max_rows = None
 
     def run(self):
-        self.times = []
-
+        self.times.clear()
         ex = 0
-        pm = ProcessMonitor()
         c = 0
         count = 0
+
         while True:
             if not self.collection.empty():
                 data = self.collection.pop()
@@ -121,26 +176,35 @@ class Consumer(threading.Thread):
                     try:
                         process = psutil.Process(pid)
                         if process.name() != "System":
-                            pm.append(process.parents()[0].exe() if len(process.parents()) > 0 else process.exe(),
-                                      data[1]['Task Name'],
-                                      data[0])
+                            task = data[1]['Task Name']
+                            self.ed.append(process.parents()[0].exe() if len(process.parents()) > 0 else process.exe(),
+                                           task,
+                                           data[0],
+                                           data[1]['EventHeader']['ProviderId'],
+                                           data[1]['IOSize'] if task == "READ" or task == "WRITE" else 0,
+                                           data[1]['EventHeader']["TimeStamp"])
 
                     except psutil.NoSuchProcess:
                         print(f"dropped {pid}")
-                        pm.df[pid] = np.zeros(44)
+                        self.ed.dfFile[pid] = np.zeros(44)
+                        self.ed.dfProcess = np.zeros(12)
+                        self.ed.dfTimeRead = defaultdict(list)
+                        self.ed.dfTimeWrite = defaultdict(list)
+                        self.ed.lastWrite = -1
+                        self.ed.lastRead = -1
 
                     self.times.append(time.time())
 
                 if c == 1000:
                     count += c
                     c = 0
-                    print(pm.predict(), count)
+                    #print(ed.predict(), count)
 
             else:
                 time.sleep(0.1)
                 ex += 1
                 if ex > 100:
-                    print(pm.predict())
+                   #print(ed.predict())
                     return
 
 
