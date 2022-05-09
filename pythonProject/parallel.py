@@ -7,11 +7,7 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 import psutil
-from numpy import uint64
-from sklearn.metrics import f1_score, accuracy_score, balanced_accuracy_score, classification_report
-
 pd.options.display.max_seq_items = None
-import dask.dataframe as dd
 
 
 class MyConcurrentCollection:
@@ -36,9 +32,11 @@ class MyConcurrentCollection:
     def empty(self):
         return self.collection.empty()
 
-
+# Класс для хранения анализируемых данных
 class EventDictionary:
     def __init__(self):
+
+        # Словарь подстановщик событий Microsoft-Windows-Kernel-File
         self.maskFile = {
             "OPERATIONEND": 0,
             24: 1,
@@ -88,80 +86,81 @@ class EventDictionary:
             "READSIZE": 30,
 
             "WRITESIZE": 31,
+
         }
+
+        # Словарь подстановщик событий Microsoft-Windows-Kernel-Process
         self.maskProcess = {
-            "PROCESSSTART": 0,
-            1: 1,
+            "PROCESSSTART": 32,
+            1: 33,
 
-            "PROCESSSTOP": 2,
-            2: 3,
+            "PROCESSSTOP": 34,
+            2: 35,
 
-            'THREADSTART': 4,
-            3: 5,
+            'THREADSTART': 36,
+            3: 37,
 
-            'THREADSTOP': 6,
-            4: 7,
+            'THREADSTOP': 38,
+            4: 39,
 
-            'IMAGELOAD': 8,
-            5: 9,
+            'IMAGELOAD': 40,
+            5: 41,
 
-            'IMAGEUNLOAD': 10,
-            6: 11,
+            'IMAGEUNLOAD': 42,
+            6: 43,
         }
 
-        self.dfFile = defaultdict(lambda: np.zeros(len(self.maskFile)))
-        self.dfProcess = defaultdict(lambda: np.zeros(len(self.maskProcess)))
+        # Сбор ключевых событий, подсчет количества каждого события и количества прочитанных/записанных байт
+        self.dfMainInfo = defaultdict(lambda: np.zeros(len(self.maskProcess) + len(self.maskFile)))
 
+        # Сбор временных интервалов между соседними операциями чтения/записи
         self.dfTimeRead = defaultdict(list)
         self.dfTimeWrite = defaultdict(list)
 
-        self.lastWrite = -1
-        self.lastRead = -1
+        # Сохранение времени последней чтения/записи
+        self.lastWrite = defaultdict(lambda: -1)
+        self.lastRead = defaultdict(lambda: -1)
 
+        # Загрузка службы выявления неизвестных ранее Ransomware, при анализе dfMainInfo
         with open("data\\isolation_forest_model.pkl", 'rb') as file:
             self.model = pickle.load(file)
 
     def append(self, pid, task, event, provider, io_size, timestamp):
         try:
+            # Определение какого поставщика обрабатывается событие и подсчет количества подобных событий
             if provider != '{22FB2CD6-0E7B-422B-A0C7-2FAD1FD0E716}':
-                self.dfFile[pid][self.maskFile[task]] += 1
-                self.dfFile[pid][self.maskFile[event]] += 1
+                self.dfMainInfo[pid][self.maskFile[task]] += 1
+                self.dfMainInfo[pid][self.maskFile[event]] += 1
 
+                # Сохранение количества записанных байт и времени
                 if task == 'WRITE':
-                    self.dfFile[pid][self.maskFile["WRITESIZE"]] += int(io_size, 0)
-                    self.dfTimeWrite[pid].append(timestamp - (self.lastWrite if self.lastWrite != -1 else 0))
-                    self.lastWrite = timestamp
+                    self.dfMainInfo[pid][self.maskFile["WRITESIZE"]] += int(io_size, 0)
+                    self.dfTimeWrite[pid].append((timestamp - self.lastWrite[pid]) if self.lastWrite[pid] != -1 else 0)
+                    self.lastWrite[pid] = timestamp
 
+                # Сохранение количества прочитанных байт и времени
                 if task == 'READ':
-                    self.dfFile[pid][self.maskFile["READSIZE"]] += int(io_size, 0)
-                    self.dfTimeRead[pid].append(timestamp - (self.lastRead if self.lastRead != -1 else 0))
-                    self.lastRead = timestamp
-
+                    self.dfMainInfo[pid][self.maskFile["READSIZE"]] += int(io_size, 0)
+                    self.dfTimeRead[pid].append((timestamp - self.lastRead[pid]) if self.lastRead[pid] != -1 else 0)
+                    self.lastRead[pid] = timestamp
             else:
-                self.dfProcess[pid][self.maskProcess[task]] += 1
-                self.dfProcess[pid][self.maskProcess[event]] += 1
-
+                self.dfMainInfo[pid][self.maskProcess[task]] += 1
+                self.dfMainInfo[pid][self.maskProcess[event]] += 1
         except KeyError:
             return
 
-
-
     def predict(self):
-        return [[key, self.model.predict([self.dfFile[key]])] for key in self.dfFile]
+        return [[key, self.model.predict([self.dfMainInfo[key]])] for key in self.dfMainInfo]
 
-
-class Consumer(threading.Thread):
+# Класс для обработки собранных событий ETW
+class EventHandler(threading.Thread):
     def __init__(self, collection: MyConcurrentCollection):
         threading.Thread.__init__(self)
         self.daemon = True
         self.collection = collection
-        self.times = []
         self.ed = EventDictionary()
-        pd.options.display.max_columns = None
-        pd.options.display.max_rows = None
 
     def run(self):
-        self.times.clear()
         ex = 0
         c = 0
         count = 0
@@ -170,41 +169,42 @@ class Consumer(threading.Thread):
             if not self.collection.empty():
                 data = self.collection.pop()
                 c += 1
+                # Выделение ключевых данных из событий
                 pid = data[1]['EventHeader']['ProcessId']
                 if pid > 0:
-                    self.times.append(time.time())
                     try:
                         process = psutil.Process(pid)
                         if process.name() != "System":
                             task = data[1]['Task Name']
+                            # Сохранение выделенных ключевых данных
                             self.ed.append(process.parents()[0].exe() if len(process.parents()) > 0 else process.exe(),
-                                           task,
-                                           data[0],
-                                           data[1]['EventHeader']['ProviderId'],
-                                           data[1]['IOSize'] if task == "READ" or task == "WRITE" else 0,
-                                           data[1]['EventHeader']["TimeStamp"])
+                                            task,
+                                            data[0],
+                                            data[1]['EventHeader']['ProviderId'],
+                                            data[1]['IOSize'] if task == "READ" or task == "WRITE" else 0,
+                                            data[1]['EventHeader']["TimeStamp"])
 
+                    # Процесс остановлен, можно освободить собранные данные по процессу.
                     except psutil.NoSuchProcess:
                         print(f"dropped {pid}")
-                        self.ed.dfFile[pid] = np.zeros(44)
-                        self.ed.dfProcess = np.zeros(12)
-                        self.ed.dfTimeRead = defaultdict(list)
-                        self.ed.dfTimeWrite = defaultdict(list)
-                        self.ed.lastWrite = -1
-                        self.ed.lastRead = -1
+                        self.ed.dfMainInfo[pid] = np.zeros(len(self.ed.maskProcess) + len(self.ed.maskFile))
+                        self.ed.dfTimeRead[pid] = []
+                        self.ed.dfTimeWrite[pid] = []
+                        self.ed.lastWrite[pid] = -1
+                        self.ed.lastRead[pid] = -1
 
-                    self.times.append(time.time())
-
+                # Обработано уже достаточное количество для начала анализа
                 if c == 1000:
                     count += c
                     c = 0
-                    #print(ed.predict(), count)
+                    print(self.ed.predict(), count)
 
+            # Ожидание заполнение очереди новыми событиями.
             else:
                 time.sleep(0.1)
                 ex += 1
                 if ex > 100:
-                   #print(ed.predict())
-                    return
+                   print(self.ed.predict())
+                   return
 
 
